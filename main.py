@@ -1,173 +1,242 @@
 import streamlit as st
-import torch
-from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-import numpy as np
-from pydub import AudioSegment
-import io
+import speech_recognition as sr
+import pyaudio
+import wave
+import tempfile
+import os
+from io import BytesIO
+import time
 
-# Set page config
+# Configure page
 st.set_page_config(
     page_title="Speech Recognition App",
     page_icon="🎤",
     layout="wide"
 )
 
-@st.cache_resource
-def load_whisper_model():
-    """Load and cache the Whisper model from Hugging Face"""
-    try:
-        model_id = "openai/whisper-base"
-        processor = AutoProcessor.from_pretrained(model_id)
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id)
-        
-        # Move to CPU (cloud deployment friendly)
-        device = "cpu"
-        model.to(device)
-        
-        return processor, model, device
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None, None, None
+# Initialize session state
+if 'recognition_result' not in st.session_state:
+    st.session_state.recognition_result = ""
+if 'is_listening' not in st.session_state:
+    st.session_state.is_listening = False
 
-def convert_audio_for_processing(audio_bytes):
-    """Convert audio bytes to format suitable for Whisper"""
+def record_audio(duration=5, sample_rate=44100, chunk=1024):
+    """Record audio from microphone"""
     try:
-        # Load audio using pydub
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        # Initialize PyAudio
+        p = pyaudio.PyAudio()
         
-        # Convert to mono and 16kHz sample rate
-        audio = audio.set_channels(1).set_frame_rate(16000)
-        
-        # Convert to numpy array
-        samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
-        samples = samples / (2**15)  # Normalize to [-1, 1]
-        
-        return samples
-    except Exception as e:
-        st.error(f"Error converting audio: {str(e)}")
-        return None
-
-def transcribe_audio(processor, model, device, audio_samples):
-    """Transcribe audio using Whisper model"""
-    try:
-        # Process audio
-        inputs = processor(audio_samples, sampling_rate=16000, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        # Generate transcription
-        with torch.no_grad():
-            predicted_ids = model.generate(**inputs)
-            transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
-        
-        return transcription[0] if transcription else ""
-    except Exception as e:
-        st.error(f"Error during transcription: {str(e)}")
-        return None
-
-def main():
-    st.title("🎤 Speech Recognition App")
-    st.markdown("Upload an audio file or record your voice to get transcription!")
-    
-    # Load model
-    with st.spinner("Loading Whisper model..."):
-        processor, model, device = load_whisper_model()
-    
-    if processor is None or model is None:
-        st.error("❌ Failed to load the speech recognition model. Please check the logs.")
-        st.stop()
-    
-    st.success("✅ Whisper model loaded successfully!")
-    
-    # Model info
-    st.sidebar.header("Model Information")
-    st.sidebar.info("**Model**: OpenAI Whisper Base\n**Size**: ~290MB\n**Language**: Multi-language support")
-    
-    # Create tabs for different input methods
-    tab1, tab2 = st.tabs(["🎙️ Record Audio", "📁 Upload Audio File"])
-    
-    with tab1:
-        st.header("Record Audio")
-        
-        # Audio input
-        audio_bytes = st.audio_input("Click to record your voice:")
-        
-        if audio_bytes:
-            st.audio(audio_bytes, format="audio/wav")
-            
-            if st.button("🔤 Transcribe Recording", type="primary"):
-                with st.spinner("Transcribing your recording..."):
-                    # Convert audio to proper format
-                    audio_samples = convert_audio_for_processing(audio_bytes)
-                    
-                    if audio_samples is not None:
-                        # Transcribe
-                        transcription = transcribe_audio(processor, model, device, audio_samples)
-                        
-                        if transcription:
-                            st.success("Transcription completed!")
-                            
-                            # Display results
-                            st.subheader("📝 Transcription:")
-                            st.write(transcription)
-                            
-                            # Copy-friendly format
-                            st.code(transcription, language=None)
-                        else:
-                            st.error("Failed to transcribe audio. Please try again.")
-    
-    with tab2:
-        st.header("Upload Audio File")
-        
-        # File uploader
-        uploaded_file = st.file_uploader(
-            "Choose an audio file",
-            type=['wav', 'mp3', 'm4a', 'flac', 'ogg'],
-            help="Supported formats: WAV, MP3, M4A, FLAC, OGG"
+        # Open stream
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=sample_rate,
+            input=True,
+            frames_per_buffer=chunk
         )
         
-        if uploaded_file is not None:
-            st.audio(uploaded_file, format="audio/wav")
+        st.info(f"🎤 Recording for {duration} seconds...")
+        frames = []
+        
+        # Record audio
+        for i in range(0, int(sample_rate / chunk * duration)):
+            data = stream.read(chunk)
+            frames.append(data)
+        
+        # Stop and close stream
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+            wf = wave.open(tmp_file.name, 'wb')
+            wf.setnchannels(1)
+            wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+            wf.setframerate(sample_rate)
+            wf.writeframes(b''.join(frames))
+            wf.close()
             
-            # Show file details
-            st.write(f"**File name:** {uploaded_file.name}")
-            st.write(f"**File size:** {uploaded_file.size / 1024 / 1024:.2f} MB")
+            return tmp_file.name
             
-            if st.button("🔤 Transcribe File", type="primary"):
-                with st.spinner("Transcribing your file..."):
-                    # Read the uploaded file
-                    audio_bytes = uploaded_file.read()
-                    
-                    # Convert audio for processing
-                    audio_samples = convert_audio_for_processing(audio_bytes)
-                    
-                    if audio_samples is not None:
-                        # Transcribe
-                        transcription = transcribe_audio(processor, model, device, audio_samples)
-                        
-                        if transcription:
-                            st.success("Transcription completed!")
-                            
-                            # Display results
-                            st.subheader("📝 Transcription:")
-                            st.write(transcription)
-                            
-                            # Copy-friendly format
-                            st.code(transcription, language=None)
-                        else:
-                            st.error("Failed to transcribe audio. Please try again.")
-    
-    # Footer
-    st.markdown("---")
-    st.markdown("Built with Streamlit and Hugging Face Transformers")
-    
-    # Usage tips
-    with st.expander("💡 Usage Tips"):
-        st.markdown("""
-        - **Best quality**: Use WAV files with 16kHz sample rate
-        - **File size**: Keep files under 25MB for faster processing
-        - **Recording**: Speak clearly and avoid background noise
-        - **Languages**: Supports multiple languages automatically
-        """)
+    except Exception as e:
+        st.error(f"Error recording audio: {str(e)}")
+        return None
 
-if __name__ == "__main__":
-    main()
+def recognize_speech_from_file(audio_file_path, language='en-US'):
+    """Convert speech to text from audio file"""
+    try:
+        r = sr.Recognizer()
+        
+        with sr.AudioFile(audio_file_path) as source:
+            # Adjust for ambient noise
+            r.adjust_for_ambient_noise(source)
+            # Record the audio
+            audio = r.record(source)
+        
+        # Perform speech recognition
+        text = r.recognize_google(audio, language=language)
+        return text
+        
+    except sr.UnknownValueError:
+        return "Could not understand the audio"
+    except sr.RequestError as e:
+        return f"Error with the speech recognition service: {e}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def recognize_speech_from_microphone(language='en-US'):
+    """Direct microphone to speech recognition"""
+    try:
+        r = sr.Recognizer()
+        
+        with sr.Microphone() as source:
+            st.info("🎤 Adjusting for ambient noise... Please wait.")
+            r.adjust_for_ambient_noise(source, duration=1)
+            st.info("🎤 Listening... Speak now!")
+            
+            # Listen for audio
+            audio = r.listen(source, timeout=10, phrase_time_limit=10)
+            
+        st.info("🔄 Processing audio...")
+        
+        # Perform speech recognition
+        text = r.recognize_google(audio, language=language)
+        return text
+        
+    except sr.WaitTimeoutError:
+        return "Listening timeout - no speech detected"
+    except sr.UnknownValueError:
+        return "Could not understand the audio"
+    except sr.RequestError as e:
+        return f"Error with the speech recognition service: {e}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# Main UI
+st.title("🎤 Speech Recognition App")
+st.markdown("Convert your speech to text using Google's Speech Recognition API")
+
+# Sidebar for settings
+st.sidebar.header("Settings")
+language_options = {
+    'English (US)': 'en-US',
+    'English (UK)': 'en-GB',
+    'Spanish': 'es-ES',
+    'French': 'fr-FR',
+    'German': 'de-DE',
+    'Italian': 'it-IT',
+    'Portuguese': 'pt-PT',
+    'Russian': 'ru-RU',
+    'Japanese': 'ja-JP',
+    'Korean': 'ko-KR',
+    'Chinese (Mandarin)': 'zh-CN'
+}
+
+selected_language = st.sidebar.selectbox(
+    "Select Language",
+    options=list(language_options.keys()),
+    index=0
+)
+
+language_code = language_options[selected_language]
+
+# Main content area
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("🎙️ Live Microphone Recognition")
+    
+    if st.button("Start Live Recording", type="primary"):
+        with st.spinner("Listening..."):
+            result = recognize_speech_from_microphone(language_code)
+            st.session_state.recognition_result = result
+    
+    st.subheader("📁 Upload Audio File")
+    uploaded_file = st.file_uploader(
+        "Choose an audio file",
+        type=['wav', 'mp3', 'flac', 'm4a'],
+        help="Upload an audio file to convert speech to text"
+    )
+    
+    if uploaded_file is not None:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{uploaded_file.name.split(".")[-1]}') as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            temp_file_path = tmp_file.name
+        
+        st.audio(uploaded_file, format=f'audio/{uploaded_file.name.split(".")[-1]}')
+        
+        if st.button("Convert Audio to Text"):
+            with st.spinner("Processing audio file..."):
+                # Convert to WAV if necessary
+                if not uploaded_file.name.lower().endswith('.wav'):
+                    try:
+                        from pydub import AudioSegment
+                        audio = AudioSegment.from_file(temp_file_path)
+                        wav_path = temp_file_path.replace(temp_file_path.split('.')[-1], 'wav')
+                        audio.export(wav_path, format="wav")
+                        result = recognize_speech_from_file(wav_path, language_code)
+                        os.unlink(wav_path)  # Clean up
+                    except ImportError:
+                        st.error("Please install pydub for non-WAV file support: pip install pydub")
+                        result = "Error: pydub not installed"
+                    except Exception as e:
+                        result = f"Error converting audio: {str(e)}"
+                else:
+                    result = recognize_speech_from_file(temp_file_path, language_code)
+                
+                st.session_state.recognition_result = result
+        
+        # Clean up temporary file
+        try:
+            os.unlink(temp_file_path)
+        except:
+            pass
+
+with col2:
+    st.subheader("📝 Recognition Results")
+    
+    if st.session_state.recognition_result:
+        st.success("Speech Recognition Result:")
+        st.text_area(
+            "Transcribed Text:",
+            value=st.session_state.recognition_result,
+            height=200,
+            key="result_text"
+        )
+        
+        # Download result as text file
+        if st.download_button(
+            label="📥 Download as Text File",
+            data=st.session_state.recognition_result,
+            file_name="speech_recognition_result.txt",
+            mime="text/plain"
+        ):
+            st.success("File downloaded successfully!")
+        
+        # Clear results
+        if st.button("🗑️ Clear Results"):
+            st.session_state.recognition_result = ""
+            st.rerun()
+    else:
+        st.info("👆 Use the controls on the left to start speech recognition")
+
+# Instructions
+st.markdown("---")
+st.subheader("📋 Instructions")
+st.markdown("""
+1. **Live Recording**: Click "Start Live Recording" and speak into your microphone
+2. **File Upload**: Upload an audio file (WAV, MP3, FLAC, M4A) and click "Convert Audio to Text"
+3. **Language**: Select your preferred language from the sidebar
+4. **Results**: View transcribed text in the results panel and download if needed
+
+**Requirements:**
+- Microphone access for live recording
+- Internet connection for Google Speech Recognition API
+- Supported audio formats: WAV, MP3, FLAC, M4A
+""")
+
+# Footer
+st.markdown("---")
+st.markdown("Built with ❤️ using Streamlit and Google Speech Recognition API")
