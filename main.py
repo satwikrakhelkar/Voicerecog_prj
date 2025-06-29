@@ -4,8 +4,6 @@ import pyaudio
 import wave
 import tempfile
 import os
-from io import BytesIO
-import time
 
 # Configure page
 st.set_page_config(
@@ -191,7 +189,7 @@ with col1:
         # Clean up temporary file
         try:
             os.unlink(temp_file_path)
-        except:
+        except Exception:
             pass
 
 with col2:
