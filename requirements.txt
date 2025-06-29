@@ -1,4 +1,6 @@
-streamlit
-SpeechRecognition
-pyaudio
+streamlit==1.23.0
+pandas
+numpy
+requests
+speechrecognition
 pydub
